@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>零成本 WebRTC 射擊場</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel intro">
+        <p class="eyebrow">WebRTC · 2–4 人原型</p>
+        <h1>零成本射擊場</h1>
+        <p>WASD 移動，滑鼠瞄準與射擊。房間建立後，遊戲資料直接在玩家之間傳送。</p>
+      </section>
+
+      <section class="panel lobby" aria-label="連線設定">
+        <label>
+          協商服務網址
+          <input id="signalingUrl" type="url" placeholder="https://你的-worker.workers.dev" autocomplete="url" />
+        </label>
+        <label>
+          房間碼
+          <input id="roomCode" type="text" maxlength="24" placeholder="例如 taipei-night" autocomplete="off" />
+        </label>
+        <div class="actions">
+          <button id="joinButton" type="button">進入房間</button>
+          <button id="copyButton" type="button" class="secondary">複製邀請連結</button>
+        </div>
+        <p id="connectionStatus" class="status" aria-live="polite">尚未連線</p>
+        <p class="hint">首次部署後填入 Worker 網址即可。若玩家網路禁止 P2P 直連，將無法加入；這個版本沒有付費 TURN 中繼。</p>
+      </section>
+
+      <section class="panel game-panel">
+        <div class="game-header">
+          <strong>競技場</strong>
+          <span id="playerCount">1 位玩家</span>
+        </div>
+        <canvas id="game" width="960" height="540" aria-label="射擊遊戲畫面"></canvas>
+        <p class="controls">W A S D：移動　·　滑鼠：瞄準　·　左鍵：射擊</p>
+      </section>
+    </main>
+    <script type="module" src="./game.js"></script>
+  </body>
+</html>
+
