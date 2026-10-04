@@ -1,0 +1,12 @@
+name = "free-fps-signaling"
+main = "src/index.js"
+compatibility_date = "2026-10-04"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomSignaling"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RoomSignaling"]
+
