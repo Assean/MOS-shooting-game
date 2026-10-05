@@ -65,6 +65,8 @@ canvas:focus { outline: 2px solid #54d7f7; outline-offset: 2px; }
 .crosshair::before { top: 11px; left: 0; width: 24px; height: 2px; }
 .crosshair::after { top: 0; left: 11px; width: 2px; height: 24px; }
 .canvas-wrap:not(.aiming) .crosshair { opacity: .35; transform: translate(-50%, -50%) scale(.7); }
+.damage-overlay { position: absolute; inset: 0; pointer-events: none; border: 0 solid rgb(255 73 73 / 0%); border-radius: 12px; box-shadow: inset 0 0 0 0 rgb(255 73 73 / 0%); transition: box-shadow .16s, border-width .16s; }
+.damage-overlay.is-hit { border-width: 12px; border-color: rgb(255 73 73 / 45%); box-shadow: inset 0 0 42px 7px rgb(255 55 55 / 38%); }
 .game-toast { position: absolute; left: 14px; bottom: 14px; max-width: calc(100% - 28px); margin: 0; padding: 8px 10px; border: 1px solid rgb(126 183 222 / 45%); border-radius: 8px; background: rgb(4 14 25 / 80%); color: #c8eaff; font-size: .78rem; backdrop-filter: blur(5px); }
 .roster { min-height: 0; padding: 13px; border: 1px solid #23445f; border-radius: 12px; background: rgb(4 16 29 / 62%); }
 .roster-heading { display: flex; justify-content: space-between; color: #e6f4ff; font-size: .85rem; font-weight: 750; letter-spacing: .04em; }

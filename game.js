@@ -20,6 +20,7 @@ const fovRange = document.querySelector('#fovRange');
 const fovValue = document.querySelector('#fovValue');
 const weaponMode = document.querySelector('#weaponMode');
 const canvasWrap = document.querySelector('.canvas-wrap');
+const damageOverlay = document.querySelector('#damageOverlay');
 
 const keys = new Set();
 const peers = new Map();
@@ -27,6 +28,7 @@ const players = new Map();
 const avatars = new Map();
 const tracers = [];
 const projectiles = [];
+const impactEffects = [];
 const staticColliders = [];
 const raycastTargets = [];
 const positionHistory = [];
@@ -37,6 +39,9 @@ const defaultSignalingUrl = 'https://mos-shooting-game.y20120816s.workers.dev';
 const SHOT_COOLDOWN = 180;
 const MOVE_SPEED = 7;
 const CAMERA_HEIGHT = 1.65;
+const HITSCAN_DAMAGE = 34;
+const PROJECTILE_DAMAGE = 45;
+const RESPAWN_INVULNERABILITY_MS = 1000;
 
 let socket;
 let networkId = 'self';
@@ -49,6 +54,7 @@ let weapon;
 let bloom = 0;
 let recoilPitch = 0;
 let recoilRoll = 0;
+let invulnerableUntil = 0;
 let localPlayer = { x: 0, y: CAMERA_HEIGHT, z: 9, angle: 0, color: '#70e5ff', name: '玩家', health: 100, kills: 0, deaths: 0 };
 
 localStorage.setItem('player-id', playerId);
@@ -372,8 +378,9 @@ function receiveGameMessage(peerId, raw) {
       renderRoster();
     }
     if (message.type === 'shot' && message.shot) {
-      spawnTracer(message.shot, '#ffca6c', message.shot.distance || 30);
-      if (isShotHit(message.shot, rewindLocalPosition(message.shot.sentAt))) takeDamage(peerId);
+      const endpoint = spawnTracer(message.shot, '#ffca6c', message.shot.distance || 30);
+      if ((message.shot.distance || 30) < 30) spawnImpact(endpoint, '#ffca6c', .12);
+      if (isShotHit(message.shot, rewindLocalPosition(message.shot.sentAt))) takeDamage(peerId, message.shot.damage || HITSCAN_DAMAGE);
     }
     if (message.type === 'projectile' && message.shot) spawnProjectile({ ...message.shot, owner: peerId }, '#c49bff');
     if (message.type === 'eliminated') recordElimination(message);
@@ -437,11 +444,27 @@ function shotDirection(shot) {
 function spawnTracer(shot, color, distance = 7) {
   const direction = shotDirection(shot);
   const origin = new THREE.Vector3(Number(shot.x) || 0, Number(shot.y) || 1.18, Number(shot.z) || 0);
-  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(.026, .026, distance, 6), makeMaterial(color, color, 4));
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(.035, .008, distance, 6), makeMaterial(color, color, 6));
   mesh.position.copy(origin).addScaledVector(direction, distance / 2);
   mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
   scene.add(mesh);
   tracers.push({ mesh, life: .12 });
+  spawnMuzzleFlash(origin, color);
+  return origin.addScaledVector(direction, distance);
+}
+
+function spawnMuzzleFlash(position, color) {
+  const light = new THREE.PointLight(color, 4.5, 5, 2);
+  light.position.copy(position);
+  scene.add(light);
+  impactEffects.push({ object: light, life: .055 });
+}
+
+function spawnImpact(position, color, size = .14) {
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(size, 10, 8), makeMaterial(color, color, 5));
+  mesh.position.copy(position);
+  scene.add(mesh);
+  impactEffects.push({ object: mesh, life: .13, shrink: true });
 }
 
 function applyRecoil() {
@@ -459,10 +482,9 @@ function makeShot() {
   return { x: localPlayer.x, y: CAMERA_HEIGHT - .28, z: localPlayer.z, dx: aim.x, dy: aim.y, dz: aim.z, angle: localPlayer.angle, sentAt: Date.now() };
 }
 
-function raycastDistance(shot) {
+function raycastHit(shot) {
   const raycaster = new THREE.Raycaster(new THREE.Vector3(shot.x, shot.y, shot.z), shotDirection(shot), .2, 30);
-  const hit = raycaster.intersectObjects(raycastTargets, false)[0];
-  return hit ? hit.distance : 30;
+  return raycaster.intersectObjects(raycastTargets, false)[0];
 }
 
 function fire() {
@@ -473,13 +495,16 @@ function fire() {
   applyRecoil();
   const shot = makeShot();
   if (weaponMode.value === 'projectile') {
-    spawnProjectile(shot, '#b78cff');
-    broadcast('event', { type: 'projectile', shot });
+    const projectileShot = { ...shot, damage: PROJECTILE_DAMAGE };
+    spawnProjectile(projectileShot, '#b78cff');
+    broadcast('event', { type: 'projectile', shot: projectileShot });
     return;
   }
-  const distance = raycastDistance(shot);
-  spawnTracer(shot, '#70e5ff', distance);
-  broadcast('event', { type: 'shot', shot: { ...shot, distance } });
+  const hit = raycastHit(shot);
+  const distance = hit ? hit.distance : 30;
+  const endpoint = spawnTracer(shot, '#70e5ff', distance);
+  if (hit) spawnImpact(endpoint, '#8fefff', .12);
+  broadcast('event', { type: 'shot', shot: { ...shot, distance, damage: HITSCAN_DAMAGE } });
 }
 
 function rewindLocalPosition(sentAt) {
@@ -501,11 +526,15 @@ function spawnProjectile(shot, color) {
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(.16, 12, 8), makeMaterial(color, color, 4));
   mesh.position.set(shot.x, shot.y, shot.z);
   scene.add(mesh);
-  projectiles.push({ mesh, velocity: shotDirection(shot).multiplyScalar(26), owner: shot.owner, life: 2.2, color });
+  projectiles.push({ mesh, velocity: shotDirection(shot).multiplyScalar(26), owner: shot.owner, damage: shot.damage || PROJECTILE_DAMAGE, life: 2.2, color });
 }
 
-function takeDamage(killerId) {
-  localPlayer.health = Math.max(0, localPlayer.health - 34);
+function takeDamage(killerId, damage) {
+  if (performance.now() < invulnerableUntil) return;
+  localPlayer.health = Math.max(0, localPlayer.health - damage);
+  damageOverlay.classList.add('is-hit');
+  setTimeout(() => damageOverlay.classList.remove('is-hit'), 140);
+  setStatus(`受到 ${damage} 點傷害，生命剩餘 ${localPlayer.health}。`, true);
   if (localPlayer.health > 0) return updateCombatStats();
   localPlayer.deaths += 1;
   const elimination = { type: 'eliminated', id: crypto.randomUUID(), killerId, victimId: networkId };
@@ -518,7 +547,8 @@ function respawn() {
   localPlayer.health = 100;
   localPlayer.x = (Math.random() * 2 - 1) * 16;
   localPlayer.z = (Math.random() * 2 - 1) * 10;
-  setStatus('已重生，重新投入競技場。');
+  invulnerableUntil = performance.now() + RESPAWN_INVULNERABILITY_MS;
+  setStatus('已重生，1 秒內無敵。');
   updateCombatStats();
 }
 
@@ -581,6 +611,19 @@ function updateTracers(dt) {
   }
 }
 
+function updateImpactEffects(dt) {
+  for (let index = impactEffects.length - 1; index >= 0; index -= 1) {
+    const effect = impactEffects[index];
+    effect.life -= dt;
+    if (effect.shrink) effect.object.scale.multiplyScalar(.88);
+    if (effect.life > 0) continue;
+    scene.remove(effect.object);
+    effect.object.geometry?.dispose();
+    effect.object.material?.dispose();
+    impactEffects.splice(index, 1);
+  }
+}
+
 function updateProjectiles(dt) {
   for (let index = projectiles.length - 1; index >= 0; index -= 1) {
     const projectile = projectiles[index];
@@ -594,7 +637,12 @@ function updateProjectiles(dt) {
     projectile.life -= dt;
     const hitLocal = projectile.owner && Math.hypot(projectile.mesh.position.x - localPlayer.x, projectile.mesh.position.z - localPlayer.z) < .68 && Math.abs(projectile.mesh.position.y - CAMERA_HEIGHT) < 1.35;
     const outside = Math.abs(projectile.mesh.position.x) > 23 || Math.abs(projectile.mesh.position.z) > 17 || projectile.mesh.position.y < 0;
-    if (hitLocal && projectile.owner) takeDamage(projectile.owner);
+    if (hitLocal && projectile.owner) {
+      takeDamage(projectile.owner, projectile.damage);
+      spawnImpact(projectile.mesh.position, '#ff8f8f', .24);
+    } else if (worldHit) {
+      spawnImpact(worldHit.point, projectile.color, .2);
+    }
     if (projectile.life <= 0 || outside || hitLocal || worldHit) {
       scene.remove(projectile.mesh);
       projectile.mesh.geometry.dispose();
@@ -656,6 +704,7 @@ function gameLoop() {
   }
   syncAvatars();
   updateTracers(dt);
+  updateImpactEffects(dt);
   updateProjectiles(dt);
   resizeRenderer();
   renderer.render(scene, camera);
