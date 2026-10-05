@@ -32,6 +32,7 @@ const impactEffects = [];
 const staticColliders = [];
 const raycastTargets = [];
 const positionHistory = [];
+const peerCombatState = new Map();
 const processedEliminations = new Set();
 const arenaBounds = { x: 20, z: 14 };
 const playerId = localStorage.getItem('player-id') || crypto.randomUUID();
@@ -42,6 +43,8 @@ const CAMERA_HEIGHT = 1.65;
 const HITSCAN_DAMAGE = 34;
 const PROJECTILE_DAMAGE = 45;
 const RESPAWN_INVULNERABILITY_MS = 1000;
+const MAX_SHOT_AGE_MS = 900;
+const MAX_FUTURE_SHOT_MS = 150;
 
 let socket;
 let networkId = 'self';
@@ -353,6 +356,7 @@ function removePeer(peerId) {
   peer.pc.close();
   peers.delete(peerId);
   players.delete(peerId);
+  peerCombatState.delete(peerId);
   removeAvatar(peerId);
   updatePlayerCount();
   if (socket?.readyState === WebSocket.OPEN) setStatus(`有玩家離開，目前 ${peers.size + 1} 位玩家`);
@@ -377,12 +381,16 @@ function receiveGameMessage(peerId, raw) {
       players.set(peerId, { ...players.get(peerId), ...message.player });
       renderRoster();
     }
-    if (message.type === 'shot' && message.shot) {
-      const endpoint = spawnTracer(message.shot, '#ffca6c', message.shot.distance || 30);
-      if ((message.shot.distance || 30) < 30) spawnImpact(endpoint, '#ffca6c', .12);
-      if (isShotHit(message.shot, rewindLocalPosition(message.shot.sentAt))) takeDamage(peerId, message.shot.damage || HITSCAN_DAMAGE);
+    if (message.type === 'shot' && message.shot && validateCombatEvent(peerId, message.shot, 'hitscan')) {
+      const shot = normalizeShot(message.shot);
+      const distance = verifiedShotDistance(shot);
+      const endpoint = spawnTracer(shot, '#ffca6c', distance);
+      if (distance < 30) spawnImpact(endpoint, '#ffca6c', .12);
+      if (isShotHit({ ...shot, distance }, rewindLocalPosition(shot.sentAt))) takeDamage(peerId, HITSCAN_DAMAGE);
     }
-    if (message.type === 'projectile' && message.shot) spawnProjectile({ ...message.shot, owner: peerId }, '#c49bff');
+    if (message.type === 'projectile' && message.shot && validateCombatEvent(peerId, message.shot, 'projectile')) {
+      spawnProjectile({ ...normalizeShot(message.shot), owner: peerId, damage: PROJECTILE_DAMAGE }, '#c49bff');
+    }
     if (message.type === 'eliminated') recordElimination(message);
   } catch { /* Ignore malformed peer messages. */ }
 }
@@ -487,6 +495,38 @@ function raycastHit(shot) {
   return raycaster.intersectObjects(raycastTargets, false)[0];
 }
 
+function normalizeShot(shot) {
+  const direction = shotDirection(shot);
+  return {
+    x: THREE.MathUtils.clamp(Number(shot.x) || 0, -arenaBounds.x, arenaBounds.x),
+    y: THREE.MathUtils.clamp(Number(shot.y) || CAMERA_HEIGHT, .2, 3),
+    z: THREE.MathUtils.clamp(Number(shot.z) || 0, -arenaBounds.z, arenaBounds.z),
+    dx: direction.x,
+    dy: direction.y,
+    dz: direction.z,
+    sentAt: Number(shot.sentAt) || Date.now(),
+  };
+}
+
+function verifiedShotDistance(shot) {
+  const collision = raycastHit(shot);
+  return collision ? collision.distance : 30;
+}
+
+function validateCombatEvent(peerId, shot, weaponType) {
+  if (!shot || !['hitscan', 'projectile'].includes(weaponType)) return false;
+  const timestamp = Number(shot.sentAt);
+  const age = Date.now() - timestamp;
+  if (!Number.isFinite(timestamp) || age > MAX_SHOT_AGE_MS || age < -MAX_FUTURE_SHOT_MS) return false;
+  const requiredGap = weaponType === 'hitscan' ? SHOT_COOLDOWN * .8 : 280;
+  const combat = peerCombatState.get(peerId) || { lastHitscan: 0, lastProjectile: 0 };
+  const key = weaponType === 'hitscan' ? 'lastHitscan' : 'lastProjectile';
+  if (timestamp - combat[key] < requiredGap) return false;
+  combat[key] = timestamp;
+  peerCombatState.set(peerId, combat);
+  return [shot.x, shot.y, shot.z, shot.dx, shot.dy, shot.dz].every(value => Number.isFinite(Number(value)));
+}
+
 function fire() {
   if (!pointerLocked) return setStatus('先點擊競技場，進入第一人稱瞄準模式。');
   const now = performance.now();
@@ -500,11 +540,10 @@ function fire() {
     broadcast('event', { type: 'projectile', shot: projectileShot });
     return;
   }
-  const hit = raycastHit(shot);
-  const distance = hit ? hit.distance : 30;
+  const distance = verifiedShotDistance(shot);
   const endpoint = spawnTracer(shot, '#70e5ff', distance);
-  if (hit) spawnImpact(endpoint, '#8fefff', .12);
-  broadcast('event', { type: 'shot', shot: { ...shot, distance, damage: HITSCAN_DAMAGE } });
+  if (distance < 30) spawnImpact(endpoint, '#8fefff', .12);
+  broadcast('event', { type: 'shot', shot });
 }
 
 function rewindLocalPosition(sentAt) {
