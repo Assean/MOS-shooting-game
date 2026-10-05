@@ -2,6 +2,17 @@ name = "free-fps-signaling"
 main = "src/index.js"
 compatibility_date = "2026-10-04"
 
+# 建立資料庫後，以 `npx wrangler d1 create mos-shooting-game` 回傳的 ID 取代此值。
+[[d1_databases]]
+binding = "DB"
+database_name = "mos-shooting-game"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[vars]
+# GitHub Pages 位址；自訂網域或本機開發來源請以逗號加入。
+ALLOWED_ORIGINS = "https://assean.github.io,http://localhost:8788"
+
 [[durable_objects.bindings]]
 name = "ROOMS"
 class_name = "RoomSignaling"

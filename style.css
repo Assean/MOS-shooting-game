@@ -17,7 +17,7 @@ body { margin: 0; min-width: 320px; background: radial-gradient(circle at 20% 0%
 .intro p { margin: 0; color: #b5cce0; }
 .eyebrow { color: #6ce5ff !important; font-weight: 700; font-size: .8rem; letter-spacing: .11em; text-transform: uppercase; }
 
-.lobby { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, .45fr) auto; gap: 14px; align-items: end; }
+.lobby { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, .38fr) minmax(120px, .38fr) auto; gap: 14px; align-items: end; }
 label { display: grid; gap: 7px; color: #b5cce0; font-size: .9rem; }
 input { min-width: 0; height: 42px; padding: 0 12px; color: #e6f4ff; background: #0a1b2d; border: 1px solid #315675; border-radius: 9px; font: inherit; }
 input:focus { outline: 2px solid #54d7f7; border-color: transparent; }

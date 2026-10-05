@@ -2,6 +2,7 @@ const canvas = document.querySelector('#game');
 const ctx = canvas.getContext('2d');
 const signalingUrlInput = document.querySelector('#signalingUrl');
 const roomCodeInput = document.querySelector('#roomCode');
+const playerNameInput = document.querySelector('#playerName');
 const joinButton = document.querySelector('#joinButton');
 const copyButton = document.querySelector('#copyButton');
 const status = document.querySelector('#connectionStatus');
@@ -15,11 +16,33 @@ let socket;
 let lastFrame = performance.now();
 let lastNetworkUpdate = 0;
 let mouse = { x: .5, y: .5 };
-let localPlayer = { x: .5, y: .5, angle: 0, color: '#70e5ff' };
+let localPlayer = { x: .5, y: .5, angle: 0, color: '#70e5ff', name: '玩家' };
 
 const params = new URLSearchParams(location.search);
 roomCodeInput.value = params.get('room') || '';
 signalingUrlInput.value = localStorage.getItem('signaling-url') || '';
+playerNameInput.value = localStorage.getItem('player-name') || '';
+const playerId = localStorage.getItem('player-id') || crypto.randomUUID();
+localStorage.setItem('player-id', playerId);
+
+function apiUrl(base, path) {
+  const url = new URL(base);
+  url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
+  return url.toString();
+}
+
+async function savePlayerProfile(base) {
+  const displayName = playerNameInput.value.trim() || '玩家';
+  if (displayName.length > 20) throw new Error('玩家名稱不可超過 20 個字元。');
+  localStorage.setItem('player-name', displayName);
+  localPlayer.name = displayName;
+  const response = await fetch(apiUrl(base, '/api/players'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ playerId, displayName }),
+  });
+  if (!response.ok) throw new Error('資料服務尚未完成設定。');
+}
 
 function setStatus(message, isError = false) {
   status.textContent = message;
@@ -57,7 +80,7 @@ async function startPeer(peerId, initiator) {
   });
   const peer = { pc, state: null, event: null };
   peers.set(peerId, peer);
-  players.set(peerId, { x: .5, y: .5, angle: 0, color: '#ffca6c' });
+  players.set(peerId, { x: .5, y: .5, angle: 0, color: '#ffca6c', name: '連線中' });
   updatePlayerCount();
 
   pc.onicecandidate = ({ candidate }) => {
@@ -114,7 +137,7 @@ function receiveGameMessage(peerId, raw) {
   } catch { /* Ignore malformed peer messages. */ }
 }
 
-function joinRoom() {
+async function joinRoom() {
   const base = signalingUrlInput.value.trim().replace(/\/$/, '');
   const room = roomCodeInput.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
   if (!base || !room) return setStatus('請填入 Worker 網址與房間碼。', true);
@@ -124,11 +147,15 @@ function joinRoom() {
   localStorage.setItem('signaling-url', base);
   roomCodeInput.value = room;
   history.replaceState(null, '', `?room=${encodeURIComponent(room)}`);
-  setStatus('正在加入房間…');
+  setStatus('正在儲存玩家資料…');
 
   let nextSocket;
-  try { nextSocket = new WebSocket(websocketUrl(base, room)); }
-  catch { return setStatus('Worker 網址格式不正確。', true); }
+  try {
+    await savePlayerProfile(base);
+    nextSocket = new WebSocket(websocketUrl(base, room));
+  } catch (error) {
+    return setStatus(error.message || 'Worker 網址格式不正確。', true);
+  }
   socket = nextSocket;
 
   nextSocket.onopen = () => setStatus('已連線至房間，正在尋找玩家…');
@@ -186,6 +213,10 @@ function drawPlayer(player, isSelf) {
   ctx.fillStyle = '#eaffff';
   ctx.fillRect(7, -3, 22, 6);
   ctx.restore();
+  ctx.fillStyle = '#d7eaff';
+  ctx.font = '14px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText(player.name || '玩家', x, y - 25);
   if (isSelf) { ctx.strokeStyle = '#eaffff'; ctx.lineWidth = 2; ctx.strokeRect(x - 20, y - 16, 40, 32); }
 }
 
