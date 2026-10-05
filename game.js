@@ -4,10 +4,16 @@ const signalingUrlInput = document.querySelector('#signalingUrl');
 const roomCodeInput = document.querySelector('#roomCode');
 const playerNameInput = document.querySelector('#playerName');
 const joinButton = document.querySelector('#joinButton');
+const leaveButton = document.querySelector('#leaveButton');
 const copyButton = document.querySelector('#copyButton');
 const status = document.querySelector('#connectionStatus');
 const playerCount = document.querySelector('#playerCount');
 const combatStats = document.querySelector('#combatStats');
+const roomIndicator = document.querySelector('#roomIndicator');
+const playerRoster = document.querySelector('#playerRoster');
+const rosterCount = document.querySelector('#rosterCount');
+const serviceBadge = document.querySelector('#serviceBadge');
+const gameToast = document.querySelector('#gameToast');
 
 const keys = new Set();
 const peers = new Map();
@@ -17,15 +23,18 @@ let socket;
 let networkId = 'self';
 let lastFrame = performance.now();
 let lastNetworkUpdate = 0;
+let lastShotAt = 0;
 let mouse = { x: .5, y: .5 };
 let localPlayer = {
   x: .5, y: .5, angle: 0, color: '#70e5ff', name: '玩家', health: 100, kills: 0, deaths: 0,
 };
 const processedEliminations = new Set();
+const SHOT_COOLDOWN = 220;
 
 const params = new URLSearchParams(location.search);
+const defaultSignalingUrl = 'https://mos-shooting-game.y20120816s.workers.dev';
 roomCodeInput.value = params.get('room') || '';
-signalingUrlInput.value = localStorage.getItem('signaling-url') || '';
+signalingUrlInput.value = params.get('worker') || localStorage.getItem('signaling-url') || defaultSignalingUrl;
 playerNameInput.value = localStorage.getItem('player-name') || '';
 const playerId = localStorage.getItem('player-id') || crypto.randomUUID();
 localStorage.setItem('player-id', playerId);
@@ -52,6 +61,60 @@ async function savePlayerProfile(base) {
 function setStatus(message, isError = false) {
   status.textContent = message;
   status.style.color = isError ? '#ff9c9c' : '#75e6a4';
+  gameToast.textContent = message;
+}
+
+function setLobbyState(joined) {
+  joinButton.disabled = joined;
+  leaveButton.disabled = !joined;
+}
+
+function setRoomIndicator(room = '') {
+  roomIndicator.textContent = room ? `房間 · ${room}` : '尚未加入房間';
+}
+
+function renderRoster() {
+  const roster = [{ ...localPlayer, isSelf: true }, ...players.values()]
+    .sort((a, b) => Number(b.isSelf) - Number(a.isSelf) || b.kills - a.kills || a.deaths - b.deaths);
+  rosterCount.textContent = String(roster.length).padStart(2, '0');
+  playerRoster.replaceChildren(...roster.map(player => {
+    const card = document.createElement('article');
+    card.className = `player-card${player.isSelf ? ' is-self' : ''}`;
+    const name = document.createElement('div');
+    name.className = 'player-name';
+    const dot = document.createElement('span');
+    dot.className = 'player-dot';
+    dot.style.background = player.color;
+    const label = document.createElement('span');
+    label.textContent = `${player.name || '玩家'}${player.isSelf ? '（你）' : ''}`;
+    name.append(dot, label);
+    const meta = document.createElement('div');
+    meta.className = 'player-meta';
+    meta.textContent = `生命 ${Math.max(0, player.health ?? 0)}　K ${player.kills || 0} / D ${player.deaths || 0}`;
+    const track = document.createElement('div');
+    track.className = 'health-track';
+    const fill = document.createElement('div');
+    fill.className = 'health-fill';
+    fill.style.width = `${Math.max(0, Math.min(100, player.health ?? 0))}%`;
+    if ((player.health ?? 0) <= 35) fill.style.background = '#ff8585';
+    track.append(fill);
+    card.append(name, meta, track);
+    return card;
+  }));
+}
+
+async function checkService(base) {
+  serviceBadge.dataset.state = 'checking';
+  serviceBadge.textContent = '檢查服務中';
+  try {
+    const response = await fetch(apiUrl(base, '/api/health'));
+    if (!response.ok) throw new Error();
+    serviceBadge.dataset.state = 'ready';
+    serviceBadge.textContent = '協商服務正常';
+  } catch {
+    serviceBadge.dataset.state = 'error';
+    serviceBadge.textContent = '服務尚未連線';
+  }
 }
 
 function websocketUrl(base, room) {
@@ -75,10 +138,12 @@ function broadcast(channel, message) {
 function updatePlayerCount() {
   const count = peers.size + 1;
   playerCount.textContent = `${count} 位玩家`;
+  renderRoster();
 }
 
 function updateCombatStats() {
   combatStats.textContent = `生命 ${localPlayer.health}　擊殺 ${localPlayer.kills}　死亡 ${localPlayer.deaths}`;
+  renderRoster();
 }
 
 async function startPeer(peerId, initiator) {
@@ -126,6 +191,7 @@ function removePeer(peerId) {
   peers.delete(peerId);
   players.delete(peerId);
   updatePlayerCount();
+  if (socket?.readyState === WebSocket.OPEN) setStatus(`有玩家離開，目前 ${peers.size + 1} 位玩家`);
 }
 
 async function receiveSignal(from, data) {
@@ -143,7 +209,10 @@ async function receiveSignal(from, data) {
 function receiveGameMessage(peerId, raw) {
   try {
     const message = JSON.parse(raw);
-    if (message.type === 'state') players.set(peerId, { ...players.get(peerId), ...message.player });
+    if (message.type === 'state') {
+      players.set(peerId, { ...players.get(peerId), ...message.player });
+      renderRoster();
+    }
     if (message.type === 'shot') {
       const shot = { ...message.shot, owner: peerId, life: .18, color: '#ffca6c' };
       shots.push(shot);
@@ -158,28 +227,41 @@ async function joinRoom() {
   const room = roomCodeInput.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
   if (!base || !room) return setStatus('請填入 Worker 網址與房間碼。', true);
 
-  for (const id of [...peers.keys()]) removePeer(id);
-  socket?.close();
+  leaveRoom(false);
   localStorage.setItem('signaling-url', base);
   roomCodeInput.value = room;
-  history.replaceState(null, '', `?room=${encodeURIComponent(room)}`);
+  const shareUrl = new URL(location.href);
+  shareUrl.searchParams.set('room', room);
+  shareUrl.searchParams.set('worker', base);
+  history.replaceState(null, '', `${shareUrl.pathname}${shareUrl.search}`);
   setStatus('正在儲存玩家資料…');
+  joinButton.disabled = true;
 
   let nextSocket;
   try {
     await savePlayerProfile(base);
     nextSocket = new WebSocket(websocketUrl(base, room));
   } catch (error) {
+    setLobbyState(false);
     return setStatus(error.message || 'Worker 網址格式不正確。', true);
   }
   socket = nextSocket;
 
-  nextSocket.onopen = () => setStatus('已連線至房間，正在尋找玩家…');
+  nextSocket.onopen = () => {
+    setLobbyState(true);
+    setRoomIndicator(room);
+    setStatus('已連線至房間，正在尋找玩家…');
+  };
   nextSocket.onerror = () => {
     if (socket === nextSocket) setStatus('無法連上協商服務。請確認 Worker 網址已部署。', true);
   };
   nextSocket.onclose = () => {
-    if (socket === nextSocket) setStatus('協商服務已斷線。', true);
+    if (socket === nextSocket) {
+      socket = undefined;
+      setLobbyState(false);
+      setRoomIndicator();
+      setStatus('協商服務已斷線。', true);
+    }
   };
   nextSocket.onmessage = async ({ data }) => {
     const message = JSON.parse(data);
@@ -192,7 +274,22 @@ async function joinRoom() {
   };
 }
 
+function leaveRoom(announce = true) {
+  for (const id of [...peers.keys()]) removePeer(id);
+  const activeSocket = socket;
+  socket = undefined;
+  activeSocket?.close();
+  networkId = 'self';
+  setLobbyState(false);
+  setRoomIndicator();
+  updatePlayerCount();
+  if (announce) setStatus('已離開房間。可輸入新房間碼重新加入。');
+}
+
 function fire() {
+  const now = performance.now();
+  if (now - lastShotAt < SHOT_COOLDOWN) return;
+  lastShotAt = now;
   const shot = { x: localPlayer.x, y: localPlayer.y, angle: localPlayer.angle, life: .18, color: '#70e5ff' };
   shots.push(shot);
   broadcast('event', { type: 'shot', shot });
@@ -239,6 +336,7 @@ function recordElimination({ id, killerId, victimId }) {
     const victim = players.get(victimId);
     players.set(victimId, { ...victim, deaths: victim.deaths + 1 });
   }
+  renderRoster();
 }
 
 function gameLoop(now) {
@@ -285,31 +383,57 @@ function drawPlayer(player, isSelf) {
 }
 
 function draw() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = '#123552'; ctx.lineWidth = 1;
+  const backdrop = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  backdrop.addColorStop(0, '#0b2841');
+  backdrop.addColorStop(1, '#071521');
+  ctx.fillStyle = backdrop;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#16405d'; ctx.lineWidth = 1;
   for (let x = 0; x < canvas.width; x += 48) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
   for (let y = 0; y < canvas.height; y += 48) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
+  ctx.strokeStyle = '#2d6385'; ctx.lineWidth = 2;
+  ctx.strokeRect(16, 16, canvas.width - 32, canvas.height - 32);
   for (const shot of shots) {
     const x = shot.x * canvas.width; const y = shot.y * canvas.height;
     ctx.strokeStyle = shot.color; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(shot.angle) * 90, y + Math.sin(shot.angle) * 90); ctx.stroke();
   }
   for (const player of players.values()) drawPlayer(player, false);
   drawPlayer(localPlayer, true);
+  const crossX = mouse.x * canvas.width;
+  const crossY = mouse.y * canvas.height;
+  ctx.strokeStyle = '#eaffff'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(crossX - 9, crossY); ctx.lineTo(crossX + 9, crossY); ctx.moveTo(crossX, crossY - 9); ctx.lineTo(crossX, crossY + 9); ctx.stroke();
 }
 
-addEventListener('keydown', event => keys.add(event.key.toLowerCase()));
+addEventListener('keydown', event => {
+  if (event.target.closest('input, button')) return;
+  const key = event.key.toLowerCase();
+  if ('wasd'.includes(key)) { keys.add(key); event.preventDefault(); }
+});
 addEventListener('keyup', event => keys.delete(event.key.toLowerCase()));
+addEventListener('blur', () => keys.clear());
 canvas.addEventListener('mousemove', event => {
   const rect = canvas.getBoundingClientRect();
   mouse = { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height };
 });
 canvas.addEventListener('mousedown', event => { if (event.button === 0) fire(); });
 joinButton.addEventListener('click', joinRoom);
+leaveButton.addEventListener('click', () => leaveRoom());
 copyButton.addEventListener('click', async () => {
-  const room = roomCodeInput.value.trim();
-  if (!room) return setStatus('先輸入房間碼。', true);
-  await navigator.clipboard.writeText(`${location.origin}${location.pathname}?room=${encodeURIComponent(room)}`);
-  setStatus('已複製邀請連結。對方也需要填入相同的 Worker 網址。');
+  const room = roomCodeInput.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  const worker = signalingUrlInput.value.trim().replace(/\/$/, '');
+  if (!room || !worker) return setStatus('先輸入 Worker 網址與房間碼。', true);
+  const invite = new URL(location.href);
+  invite.searchParams.set('room', room);
+  invite.searchParams.set('worker', worker);
+  try {
+    await navigator.clipboard.writeText(invite.toString());
+    setStatus('已複製邀請連結，朋友開啟後可直接加入同一房間。');
+  } catch {
+    setStatus('無法存取剪貼簿，請手動複製瀏覽器網址。', true);
+  }
 });
 requestAnimationFrame(gameLoop);
 updateCombatStats();
+checkService(signalingUrlInput.value);
+signalingUrlInput.addEventListener('change', () => checkService(signalingUrlInput.value.trim()));
