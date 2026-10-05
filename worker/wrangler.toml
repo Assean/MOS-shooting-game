@@ -6,12 +6,16 @@ compatibility_date = "2026-10-04"
 [[d1_databases]]
 binding = "DB"
 database_name = "mos-shooting-game"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "dae52789-b085-43d7-ae96-f7fcb9751069"
 migrations_dir = "migrations"
 
 [vars]
 # GitHub Pages 位址；自訂網域或本機開發來源請以逗號加入。
-ALLOWED_ORIGINS = "https://assean.github.io,http://localhost:8788"
+ALLOWED_ORIGINS = "https://assean.github.io,https://mos-shooting-game.pages.dev,https://mos-shooting-game.y20120816s.workers.dev,http://localhost:8788"
+
+[assets]
+directory = ".."
+run_worker_first = ["/api/*", "/ws/*"]
 
 [[durable_objects.bindings]]
 name = "ROOMS"
@@ -19,4 +23,4 @@ class_name = "RoomSignaling"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["RoomSignaling"]
+new_sqlite_classes = ["RoomSignaling"]
