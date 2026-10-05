@@ -1,5 +1,5 @@
 {
-  "name": "free-fps-signaling",
+  "name": "mos-shooting-game",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy"
