@@ -31,6 +31,7 @@ button:hover { filter: brightness(1.08); }
 
 .game-panel { padding: 14px; }
 .game-header { display: flex; justify-content: space-between; align-items: center; margin: 2px 5px 12px; color: #b5cce0; }
+.game-stats { display: flex; align-items: center; gap: 16px; font-size: .88rem; }
 canvas { display: block; width: 100%; height: auto; border-radius: 10px; background: #09192a; border: 1px solid #23445f; touch-action: none; }
 .controls { margin: 12px 5px 2px; color: #87a6be; font-size: .88rem; }
 

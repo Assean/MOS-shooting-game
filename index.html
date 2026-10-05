@@ -38,10 +38,13 @@
       <section class="panel game-panel">
         <div class="game-header">
           <strong>競技場</strong>
-          <span id="playerCount">1 位玩家</span>
+          <div class="game-stats">
+            <span id="combatStats">生命 100　擊殺 0　死亡 0</span>
+            <span id="playerCount">1 位玩家</span>
+          </div>
         </div>
         <canvas id="game" width="960" height="540" aria-label="射擊遊戲畫面"></canvas>
-        <p class="controls">W A S D：移動　·　滑鼠：瞄準　·　左鍵：射擊</p>
+        <p class="controls">W A S D：移動　·　滑鼠：瞄準　·　左鍵：射擊　·　生命歸零後隨機重生</p>
       </section>
     </main>
     <script type="module" src="./game.js"></script>

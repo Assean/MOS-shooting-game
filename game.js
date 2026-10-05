@@ -7,16 +7,21 @@ const joinButton = document.querySelector('#joinButton');
 const copyButton = document.querySelector('#copyButton');
 const status = document.querySelector('#connectionStatus');
 const playerCount = document.querySelector('#playerCount');
+const combatStats = document.querySelector('#combatStats');
 
 const keys = new Set();
 const peers = new Map();
 const players = new Map();
 const shots = [];
 let socket;
+let networkId = 'self';
 let lastFrame = performance.now();
 let lastNetworkUpdate = 0;
 let mouse = { x: .5, y: .5 };
-let localPlayer = { x: .5, y: .5, angle: 0, color: '#70e5ff', name: '玩家' };
+let localPlayer = {
+  x: .5, y: .5, angle: 0, color: '#70e5ff', name: '玩家', health: 100, kills: 0, deaths: 0,
+};
+const processedEliminations = new Set();
 
 const params = new URLSearchParams(location.search);
 roomCodeInput.value = params.get('room') || '';
@@ -72,6 +77,10 @@ function updatePlayerCount() {
   playerCount.textContent = `${count} 位玩家`;
 }
 
+function updateCombatStats() {
+  combatStats.textContent = `生命 ${localPlayer.health}　擊殺 ${localPlayer.kills}　死亡 ${localPlayer.deaths}`;
+}
+
 async function startPeer(peerId, initiator) {
   if (peers.has(peerId)) return peers.get(peerId);
 
@@ -80,7 +89,9 @@ async function startPeer(peerId, initiator) {
   });
   const peer = { pc, state: null, event: null };
   peers.set(peerId, peer);
-  players.set(peerId, { x: .5, y: .5, angle: 0, color: '#ffca6c', name: '連線中' });
+  players.set(peerId, {
+    x: .5, y: .5, angle: 0, color: '#ffca6c', name: '連線中', health: 100, kills: 0, deaths: 0,
+  });
   updatePlayerCount();
 
   pc.onicecandidate = ({ candidate }) => {
@@ -133,7 +144,12 @@ function receiveGameMessage(peerId, raw) {
   try {
     const message = JSON.parse(raw);
     if (message.type === 'state') players.set(peerId, { ...players.get(peerId), ...message.player });
-    if (message.type === 'shot') shots.push({ ...message.shot, life: .18, color: '#ffca6c' });
+    if (message.type === 'shot') {
+      const shot = { ...message.shot, owner: peerId, life: .18, color: '#ffca6c' };
+      shots.push(shot);
+      if (isShotHit(shot, localPlayer)) takeDamage(peerId);
+    }
+    if (message.type === 'eliminated') recordElimination(message);
   } catch { /* Ignore malformed peer messages. */ }
 }
 
@@ -168,6 +184,7 @@ async function joinRoom() {
   nextSocket.onmessage = async ({ data }) => {
     const message = JSON.parse(data);
     if (message.type === 'welcome') {
+      networkId = message.id;
       for (const peerId of message.peers) await startPeer(peerId, true);
     }
     if (message.type === 'signal') await receiveSignal(message.from, message.data);
@@ -179,6 +196,49 @@ function fire() {
   const shot = { x: localPlayer.x, y: localPlayer.y, angle: localPlayer.angle, life: .18, color: '#70e5ff' };
   shots.push(shot);
   broadcast('event', { type: 'shot', shot });
+}
+
+function isShotHit(shot, target) {
+  const dx = (target.x - shot.x) * canvas.width;
+  const dy = (target.y - shot.y) * canvas.height;
+  const forward = dx * Math.cos(shot.angle) + dy * Math.sin(shot.angle);
+  const side = Math.abs(-Math.sin(shot.angle) * dx + Math.cos(shot.angle) * dy);
+  return forward > 12 && forward < 180 && side < 20;
+}
+
+function takeDamage(killerId) {
+  localPlayer.health = Math.max(0, localPlayer.health - 34);
+  if (localPlayer.health > 0) return updateCombatStats();
+
+  localPlayer.deaths += 1;
+  const elimination = { type: 'eliminated', id: crypto.randomUUID(), killerId, victimId: networkId };
+  recordElimination(elimination);
+  broadcast('event', elimination);
+  respawn();
+}
+
+function respawn() {
+  localPlayer.health = 100;
+  localPlayer.x = .1 + Math.random() * .8;
+  localPlayer.y = .12 + Math.random() * .76;
+  updateCombatStats();
+}
+
+function recordElimination({ id, killerId, victimId }) {
+  if (!id || processedEliminations.has(id)) return;
+  processedEliminations.add(id);
+  if (processedEliminations.size > 100) processedEliminations.delete(processedEliminations.values().next().value);
+  if (killerId === networkId) {
+    localPlayer.kills += 1;
+    updateCombatStats();
+  } else if (players.has(killerId)) {
+    const killer = players.get(killerId);
+    players.set(killerId, { ...killer, kills: killer.kills + 1 });
+  }
+  if (victimId !== networkId && players.has(victimId)) {
+    const victim = players.get(victimId);
+    players.set(victimId, { ...victim, deaths: victim.deaths + 1 });
+  }
 }
 
 function gameLoop(now) {
@@ -217,6 +277,10 @@ function drawPlayer(player, isSelf) {
   ctx.font = '14px system-ui';
   ctx.textAlign = 'center';
   ctx.fillText(player.name || '玩家', x, y - 25);
+  ctx.fillStyle = '#162536';
+  ctx.fillRect(x - 20, y - 20, 40, 4);
+  ctx.fillStyle = player.health > 35 ? '#75e6a4' : '#ff8585';
+  ctx.fillRect(x - 20, y - 20, 40 * Math.max(0, player.health || 0) / 100, 4);
   if (isSelf) { ctx.strokeStyle = '#eaffff'; ctx.lineWidth = 2; ctx.strokeRect(x - 20, y - 16, 40, 32); }
 }
 
@@ -248,3 +312,4 @@ copyButton.addEventListener('click', async () => {
   setStatus('已複製邀請連結。對方也需要填入相同的 Worker 網址。');
 });
 requestAnimationFrame(gameLoop);
+updateCombatStats();
