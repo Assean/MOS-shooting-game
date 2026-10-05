@@ -1,5 +1,6 @@
+import * as THREE from 'three';
+
 const canvas = document.querySelector('#game');
-const ctx = canvas.getContext('2d');
 const signalingUrlInput = document.querySelector('#signalingUrl');
 const roomCodeInput = document.querySelector('#roomCode');
 const playerNameInput = document.querySelector('#playerName');
@@ -14,30 +15,187 @@ const playerRoster = document.querySelector('#playerRoster');
 const rosterCount = document.querySelector('#rosterCount');
 const serviceBadge = document.querySelector('#serviceBadge');
 const gameToast = document.querySelector('#gameToast');
+const qualityPreset = document.querySelector('#qualityPreset');
+const fovRange = document.querySelector('#fovRange');
+const fovValue = document.querySelector('#fovValue');
+const canvasWrap = document.querySelector('.canvas-wrap');
 
 const keys = new Set();
 const peers = new Map();
 const players = new Map();
-const shots = [];
+const avatars = new Map();
+const tracers = [];
+const processedEliminations = new Set();
+const arenaBounds = { x: 20, z: 14 };
+const playerId = localStorage.getItem('player-id') || crypto.randomUUID();
+const defaultSignalingUrl = 'https://mos-shooting-game.y20120816s.workers.dev';
+const SHOT_COOLDOWN = 180;
+const MOVE_SPEED = 7;
+const CAMERA_HEIGHT = 1.65;
+
 let socket;
 let networkId = 'self';
-let lastFrame = performance.now();
 let lastNetworkUpdate = 0;
 let lastShotAt = 0;
-let mouse = { x: .5, y: .5 };
-let localPlayer = {
-  x: .5, y: .5, angle: 0, color: '#70e5ff', name: '玩家', health: 100, kills: 0, deaths: 0,
-};
-const processedEliminations = new Set();
-const SHOT_COOLDOWN = 220;
+let yaw = 0;
+let pitch = 0;
+let pointerLocked = false;
+let localPlayer = { x: 0, y: CAMERA_HEIGHT, z: 9, angle: 0, color: '#70e5ff', name: '玩家', health: 100, kills: 0, deaths: 0 };
 
+localStorage.setItem('player-id', playerId);
 const params = new URLSearchParams(location.search);
-const defaultSignalingUrl = 'https://mos-shooting-game.y20120816s.workers.dev';
 roomCodeInput.value = params.get('room') || '';
 signalingUrlInput.value = params.get('worker') || localStorage.getItem('signaling-url') || defaultSignalingUrl;
 playerNameInput.value = localStorage.getItem('player-name') || '';
-const playerId = localStorage.getItem('player-id') || crypto.randomUUID();
-localStorage.setItem('player-id', playerId);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#061525');
+scene.fog = new THREE.Fog('#061525', 18, 72);
+const camera = new THREE.PerspectiveCamera(75, 16 / 9, .05, 120);
+camera.rotation.order = 'YXZ';
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const clock = new THREE.Clock();
+
+scene.add(new THREE.HemisphereLight('#9ad9ff', '#07101a', 1.8));
+const keyLight = new THREE.DirectionalLight('#e8f7ff', 2.4);
+keyLight.position.set(8, 18, 5);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(1024, 1024);
+scene.add(keyLight);
+
+function makeMaterial(color, emissive = '#000000', intensity = 0) {
+  return new THREE.MeshStandardMaterial({ color, emissive, emissiveIntensity: intensity, roughness: .62, metalness: .22 });
+}
+
+function addBox({ x, y, z, width, height, depth, color = '#183a54', emissive, intensity }) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), makeMaterial(color, emissive, intensity));
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+function buildArena() {
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(48, 36), makeMaterial('#0b2a41'));
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+  const grid = new THREE.GridHelper(48, 48, '#2a7594', '#123d58');
+  grid.position.y = .015;
+  scene.add(grid);
+  addBox({ x: 0, y: 2, z: -17, width: 48, height: 4, depth: .7, color: '#102b42' });
+  addBox({ x: 0, y: 2, z: 17, width: 48, height: 4, depth: .7, color: '#102b42' });
+  addBox({ x: -23.5, y: 2, z: 0, width: .7, height: 4, depth: 34, color: '#102b42' });
+  addBox({ x: 23.5, y: 2, z: 0, width: .7, height: 4, depth: 34, color: '#102b42' });
+  for (const [x, z, color] of [[-14, -9, '#5df1ff'], [14, -9, '#a783ff'], [-14, 9, '#a783ff'], [14, 9, '#5df1ff']]) {
+    const pillar = new THREE.Group();
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(.8, 1.15, .35, 10), makeMaterial('#16445f'));
+    const core = new THREE.Mesh(new THREE.CylinderGeometry(.28, .28, 4.2, 12), makeMaterial(color, color, 2.4));
+    base.position.y = .18;
+    core.position.y = 2.15;
+    core.castShadow = true;
+    pillar.add(base, core);
+    pillar.position.set(x, 0, z);
+    scene.add(pillar);
+    const glow = new THREE.PointLight(color, 4, 10, 2);
+    glow.position.set(x, 2.3, z);
+    scene.add(glow);
+  }
+  for (const [x, z, width, depth] of [[0, 0, 7, 1.2], [-7, 3.5, 1.2, 5], [7, -3.5, 1.2, 5]]) addBox({ x, y: .45, z, width, height: .9, depth, color: '#174460' });
+}
+
+function createWeapon() {
+  const weapon = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(.18, .14, .72), makeMaterial('#1c6a86', '#0b3445', .6));
+  const barrel = new THREE.Mesh(new THREE.BoxGeometry(.08, .08, .55), makeMaterial('#75e6ff', '#4ddff8', 1.8));
+  const sight = new THREE.Mesh(new THREE.BoxGeometry(.07, .05, .16), makeMaterial('#d8f8ff'));
+  body.position.set(0, 0, -.2);
+  barrel.position.set(0, .015, -.75);
+  sight.position.set(0, .12, -.35);
+  weapon.add(body, barrel, sight);
+  weapon.position.set(.34, -.32, -.62);
+  weapon.rotation.set(-.08, -.08, 0);
+  camera.add(weapon);
+  scene.add(camera);
+}
+
+function createLabel(name, color) {
+  const labelCanvas = document.createElement('canvas');
+  labelCanvas.width = 256;
+  labelCanvas.height = 64;
+  const texture = new THREE.CanvasTexture(labelCanvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+  sprite.scale.set(2.8, .7, 1);
+  sprite.position.y = 2.55;
+  sprite.userData = { canvas: labelCanvas, texture, name: '', color: '' };
+  updateLabel(sprite, name, color);
+  return sprite;
+}
+
+function updateLabel(sprite, name, color) {
+  if (sprite.userData.name === name && sprite.userData.color === color) return;
+  const { canvas: labelCanvas, texture } = sprite.userData;
+  const labelContext = labelCanvas.getContext('2d');
+  labelContext.clearRect(0, 0, labelCanvas.width, labelCanvas.height);
+  labelContext.font = '700 28px system-ui';
+  labelContext.textAlign = 'center';
+  labelContext.textBaseline = 'middle';
+  labelContext.fillStyle = 'rgba(3, 15, 26, .72)';
+  labelContext.fillRect(23, 10, 210, 44);
+  labelContext.fillStyle = color;
+  labelContext.fillText(name, 128, 33);
+  texture.needsUpdate = true;
+  sprite.userData.name = name;
+  sprite.userData.color = color;
+}
+
+function createAvatar(player) {
+  const group = new THREE.Group();
+  const bodyMaterial = makeMaterial(player.color, player.color, .25);
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(.42, .75, 5, 10), bodyMaterial);
+  body.position.y = .94;
+  body.castShadow = true;
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(.5, .18, .2), makeMaterial('#dffaff', '#7eeaff', 1.2));
+  visor.position.set(0, 1.38, -.34);
+  const rifle = new THREE.Mesh(new THREE.BoxGeometry(.14, .12, .72), makeMaterial('#182f40'));
+  rifle.position.set(.28, .9, -.42);
+  const label = createLabel(player.name || '連線中', player.color);
+  group.add(body, visor, rifle, label);
+  scene.add(group);
+  return { group, bodyMaterial, label };
+}
+
+function removeAvatar(peerId) {
+  const avatar = avatars.get(peerId);
+  if (!avatar) return;
+  scene.remove(avatar.group);
+  avatar.group.traverse(object => {
+    object.geometry?.dispose();
+    if (object.material?.map) object.material.map.dispose();
+    object.material?.dispose();
+  });
+  avatars.delete(peerId);
+}
+
+function syncAvatars() {
+  for (const [peerId, player] of players) {
+    let avatar = avatars.get(peerId);
+    if (!avatar) {
+      avatar = createAvatar(player);
+      avatars.set(peerId, avatar);
+    }
+    avatar.group.position.set(player.x ?? 0, 0, player.z ?? 0);
+    avatar.group.rotation.y = player.angle ?? 0;
+    avatar.bodyMaterial.color.set(player.color || '#ffca6c');
+    avatar.bodyMaterial.emissive.set(player.color || '#ffca6c');
+    updateLabel(avatar.label, player.name || '玩家', player.color || '#ffca6c');
+  }
+}
 
 function apiUrl(base, path) {
   const url = new URL(base);
@@ -45,17 +203,11 @@ function apiUrl(base, path) {
   return url.toString();
 }
 
-async function savePlayerProfile(base) {
-  const displayName = playerNameInput.value.trim() || '玩家';
-  if (displayName.length > 20) throw new Error('玩家名稱不可超過 20 個字元。');
-  localStorage.setItem('player-name', displayName);
-  localPlayer.name = displayName;
-  const response = await fetch(apiUrl(base, '/api/players'), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ playerId, displayName }),
-  });
-  if (!response.ok) throw new Error('資料服務尚未完成設定。');
+function websocketUrl(base, room) {
+  const url = new URL(base);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.pathname = `${url.pathname.replace(/\/$/, '')}/ws/${encodeURIComponent(room)}`;
+  return url.toString();
 }
 
 function setStatus(message, isError = false) {
@@ -103,6 +255,16 @@ function renderRoster() {
   }));
 }
 
+function updatePlayerCount() {
+  playerCount.textContent = `${peers.size + 1} 位玩家`;
+  renderRoster();
+}
+
+function updateCombatStats() {
+  combatStats.textContent = `生命 ${localPlayer.health}　擊殺 ${localPlayer.kills}　死亡 ${localPlayer.deaths}`;
+  renderRoster();
+}
+
 async function checkService(base) {
   serviceBadge.dataset.state = 'checking';
   serviceBadge.textContent = '檢查服務中';
@@ -117,11 +279,16 @@ async function checkService(base) {
   }
 }
 
-function websocketUrl(base, room) {
-  const url = new URL(base);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.pathname = `${url.pathname.replace(/\/$/, '')}/ws/${encodeURIComponent(room)}`;
-  return url.toString();
+async function savePlayerProfile(base) {
+  const displayName = playerNameInput.value.trim() || '玩家';
+  if (displayName.length > 20) throw new Error('玩家名稱不可超過 20 個字元。');
+  localStorage.setItem('player-name', displayName);
+  localPlayer.name = displayName;
+  const response = await fetch(apiUrl(base, '/api/players'), {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ playerId, displayName }),
+  });
+  if (!response.ok) throw new Error('資料服務尚未完成設定。');
+  updateCombatStats();
 }
 
 function sendSignal(message) {
@@ -129,44 +296,22 @@ function sendSignal(message) {
 }
 
 function broadcast(channel, message) {
-  for (const peer of peers.values()) {
-    const dataChannel = peer[channel];
-    if (dataChannel?.readyState === 'open') dataChannel.send(JSON.stringify(message));
-  }
-}
-
-function updatePlayerCount() {
-  const count = peers.size + 1;
-  playerCount.textContent = `${count} 位玩家`;
-  renderRoster();
-}
-
-function updateCombatStats() {
-  combatStats.textContent = `生命 ${localPlayer.health}　擊殺 ${localPlayer.kills}　死亡 ${localPlayer.deaths}`;
-  renderRoster();
+  const raw = JSON.stringify(message);
+  for (const peer of peers.values()) if (peer[channel]?.readyState === 'open') peer[channel].send(raw);
 }
 
 async function startPeer(peerId, initiator) {
   if (peers.has(peerId)) return peers.get(peerId);
-
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-  });
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
   const peer = { pc, state: null, event: null };
   peers.set(peerId, peer);
-  players.set(peerId, {
-    x: .5, y: .5, angle: 0, color: '#ffca6c', name: '連線中', health: 100, kills: 0, deaths: 0,
-  });
+  const player = { x: 0, y: CAMERA_HEIGHT, z: 0, angle: 0, color: '#ffca6c', name: '連線中', health: 100, kills: 0, deaths: 0 };
+  players.set(peerId, player);
+  avatars.set(peerId, createAvatar(player));
   updatePlayerCount();
-
-  pc.onicecandidate = ({ candidate }) => {
-    if (candidate) sendSignal({ type: 'signal', to: peerId, data: { candidate } });
-  };
-  pc.onconnectionstatechange = () => {
-    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) removePeer(peerId);
-  };
+  pc.onicecandidate = ({ candidate }) => { if (candidate) sendSignal({ type: 'signal', to: peerId, data: { candidate } }); };
+  pc.onconnectionstatechange = () => { if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) removePeer(peerId); };
   pc.ondatachannel = ({ channel }) => attachChannel(peerId, channel);
-
   if (initiator) {
     attachChannel(peerId, pc.createDataChannel('state', { ordered: false, maxRetransmits: 0 }));
     attachChannel(peerId, pc.createDataChannel('event'));
@@ -190,6 +335,7 @@ function removePeer(peerId) {
   peer.pc.close();
   peers.delete(peerId);
   players.delete(peerId);
+  removeAvatar(peerId);
   updatePlayerCount();
   if (socket?.readyState === WebSocket.OPEN) setStatus(`有玩家離開，目前 ${peers.size + 1} 位玩家`);
 }
@@ -209,14 +355,13 @@ async function receiveSignal(from, data) {
 function receiveGameMessage(peerId, raw) {
   try {
     const message = JSON.parse(raw);
-    if (message.type === 'state') {
+    if (message.type === 'state' && message.player) {
       players.set(peerId, { ...players.get(peerId), ...message.player });
       renderRoster();
     }
-    if (message.type === 'shot') {
-      const shot = { ...message.shot, owner: peerId, life: .18, color: '#ffca6c' };
-      shots.push(shot);
-      if (isShotHit(shot, localPlayer)) takeDamage(peerId);
+    if (message.type === 'shot' && message.shot) {
+      spawnTracer(message.shot, '#ffca6c');
+      if (isShotHit(message.shot, localPlayer)) takeDamage(peerId);
     }
     if (message.type === 'eliminated') recordElimination(message);
   } catch { /* Ignore malformed peer messages. */ }
@@ -226,7 +371,6 @@ async function joinRoom() {
   const base = signalingUrlInput.value.trim().replace(/\/$/, '');
   const room = roomCodeInput.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
   if (!base || !room) return setStatus('請填入 Worker 網址與房間碼。', true);
-
   leaveRoom(false);
   localStorage.setItem('signaling-url', base);
   roomCodeInput.value = room;
@@ -236,7 +380,6 @@ async function joinRoom() {
   history.replaceState(null, '', `${shareUrl.pathname}${shareUrl.search}`);
   setStatus('正在儲存玩家資料…');
   joinButton.disabled = true;
-
   let nextSocket;
   try {
     await savePlayerProfile(base);
@@ -246,22 +389,10 @@ async function joinRoom() {
     return setStatus(error.message || 'Worker 網址格式不正確。', true);
   }
   socket = nextSocket;
-
-  nextSocket.onopen = () => {
-    setLobbyState(true);
-    setRoomIndicator(room);
-    setStatus('已連線至房間，正在尋找玩家…');
-  };
-  nextSocket.onerror = () => {
-    if (socket === nextSocket) setStatus('無法連上協商服務。請確認 Worker 網址已部署。', true);
-  };
+  nextSocket.onopen = () => { setLobbyState(true); setRoomIndicator(room); setStatus('已連線至房間，正在尋找玩家…'); };
+  nextSocket.onerror = () => { if (socket === nextSocket) setStatus('無法連上協商服務。請確認 Worker 網址已部署。', true); };
   nextSocket.onclose = () => {
-    if (socket === nextSocket) {
-      socket = undefined;
-      setLobbyState(false);
-      setRoomIndicator();
-      setStatus('協商服務已斷線。', true);
-    }
+    if (socket === nextSocket) { socket = undefined; setLobbyState(false); setRoomIndicator(); setStatus('協商服務已斷線。', true); }
   };
   nextSocket.onmessage = async ({ data }) => {
     const message = JSON.parse(data);
@@ -286,27 +417,39 @@ function leaveRoom(announce = true) {
   if (announce) setStatus('已離開房間。可輸入新房間碼重新加入。');
 }
 
+function spawnTracer(shot, color) {
+  const angle = Number(shot.angle) || 0;
+  const direction = new THREE.Vector3(Math.sin(angle), 0, -Math.cos(angle));
+  const origin = new THREE.Vector3(Number(shot.x) || 0, 1.18, Number(shot.z) || 0);
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(.026, .026, 7, 6), makeMaterial(color, color, 4));
+  mesh.position.copy(origin).addScaledVector(direction, 3.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+  scene.add(mesh);
+  tracers.push({ mesh, life: .12 });
+}
+
 function fire() {
+  if (!pointerLocked) return setStatus('先點擊競技場，進入第一人稱瞄準模式。');
   const now = performance.now();
   if (now - lastShotAt < SHOT_COOLDOWN) return;
   lastShotAt = now;
-  const shot = { x: localPlayer.x, y: localPlayer.y, angle: localPlayer.angle, life: .18, color: '#70e5ff' };
-  shots.push(shot);
+  const shot = { x: localPlayer.x, z: localPlayer.z, angle: localPlayer.angle };
+  spawnTracer(shot, '#70e5ff');
   broadcast('event', { type: 'shot', shot });
 }
 
 function isShotHit(shot, target) {
-  const dx = (target.x - shot.x) * canvas.width;
-  const dy = (target.y - shot.y) * canvas.height;
-  const forward = dx * Math.cos(shot.angle) + dy * Math.sin(shot.angle);
-  const side = Math.abs(-Math.sin(shot.angle) * dx + Math.cos(shot.angle) * dy);
-  return forward > 12 && forward < 180 && side < 20;
+  const angle = Number(shot.angle) || 0;
+  const dx = (target.x ?? 0) - (shot.x ?? 0);
+  const dz = (target.z ?? 0) - (shot.z ?? 0);
+  const forward = dx * Math.sin(angle) - dz * Math.cos(angle);
+  const side = Math.abs(dx * Math.cos(angle) + dz * Math.sin(angle));
+  return forward > .65 && forward < 28 && side < .72;
 }
 
 function takeDamage(killerId) {
   localPlayer.health = Math.max(0, localPlayer.health - 34);
   if (localPlayer.health > 0) return updateCombatStats();
-
   localPlayer.deaths += 1;
   const elimination = { type: 'eliminated', id: crypto.randomUUID(), killerId, victimId: networkId };
   recordElimination(elimination);
@@ -316,8 +459,9 @@ function takeDamage(killerId) {
 
 function respawn() {
   localPlayer.health = 100;
-  localPlayer.x = .1 + Math.random() * .8;
-  localPlayer.y = .12 + Math.random() * .76;
+  localPlayer.x = (Math.random() * 2 - 1) * 16;
+  localPlayer.z = (Math.random() * 2 - 1) * 10;
+  setStatus('已重生，重新投入競技場。');
   updateCombatStats();
 }
 
@@ -325,98 +469,100 @@ function recordElimination({ id, killerId, victimId }) {
   if (!id || processedEliminations.has(id)) return;
   processedEliminations.add(id);
   if (processedEliminations.size > 100) processedEliminations.delete(processedEliminations.values().next().value);
-  if (killerId === networkId) {
-    localPlayer.kills += 1;
-    updateCombatStats();
-  } else if (players.has(killerId)) {
-    const killer = players.get(killerId);
-    players.set(killerId, { ...killer, kills: killer.kills + 1 });
-  }
-  if (victimId !== networkId && players.has(victimId)) {
-    const victim = players.get(victimId);
-    players.set(victimId, { ...victim, deaths: victim.deaths + 1 });
-  }
-  renderRoster();
+  if (killerId === networkId) localPlayer.kills += 1;
+  else if (players.has(killerId)) players.set(killerId, { ...players.get(killerId), kills: players.get(killerId).kills + 1 });
+  if (victimId !== networkId && players.has(victimId)) players.set(victimId, { ...players.get(victimId), deaths: players.get(victimId).deaths + 1 });
+  updateCombatStats();
 }
 
-function gameLoop(now) {
-  const dt = Math.min((now - lastFrame) / 1000, .05);
-  lastFrame = now;
-  const dx = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
-  const dy = (keys.has('s') ? 1 : 0) - (keys.has('w') ? 1 : 0);
-  if (dx || dy) {
-    const length = Math.hypot(dx, dy);
-    localPlayer.x = Math.max(.025, Math.min(.975, localPlayer.x + dx / length * dt * .32));
-    localPlayer.y = Math.max(.04, Math.min(.96, localPlayer.y + dy / length * dt * .32));
+function updateMovement(dt) {
+  const forward = (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0);
+  const strafe = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
+  if (!forward && !strafe) return;
+  const distance = MOVE_SPEED * dt / Math.hypot(forward, strafe);
+  localPlayer.x = THREE.MathUtils.clamp(localPlayer.x + (Math.sin(yaw) * forward + Math.cos(yaw) * strafe) * distance, -arenaBounds.x, arenaBounds.x);
+  localPlayer.z = THREE.MathUtils.clamp(localPlayer.z + (-Math.cos(yaw) * forward + Math.sin(yaw) * strafe) * distance, -arenaBounds.z, arenaBounds.z);
+}
+
+function updateCamera() {
+  camera.position.set(localPlayer.x, CAMERA_HEIGHT, localPlayer.z);
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+  localPlayer.angle = yaw;
+}
+
+function updateTracers(dt) {
+  for (let index = tracers.length - 1; index >= 0; index -= 1) {
+    tracers[index].life -= dt;
+    if (tracers[index].life <= 0) {
+      scene.remove(tracers[index].mesh);
+      tracers[index].mesh.geometry.dispose();
+      tracers[index].mesh.material.dispose();
+      tracers.splice(index, 1);
+    }
   }
-  localPlayer.angle = Math.atan2(mouse.y - localPlayer.y, mouse.x - localPlayer.x);
-  if (now - lastNetworkUpdate > 50) {
-    broadcast('state', { type: 'state', player: localPlayer });
-    lastNetworkUpdate = now;
+}
+
+function resizeRenderer() {
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (width && height && (canvas.width !== Math.floor(width * renderer.getPixelRatio()) || canvas.height !== Math.floor(height * renderer.getPixelRatio()))) {
+    renderer.setSize(width, height, false);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
   }
-  for (const shot of shots) shot.life -= dt;
-  while (shots.length && shots[0].life <= 0) shots.shift();
-  draw();
+}
+
+function applyGraphicsSettings() {
+  const preset = qualityPreset.value;
+  renderer.setPixelRatio(preset === 'performance' ? 1 : preset === 'quality' ? Math.min(devicePixelRatio, 2) : Math.min(devicePixelRatio, 1.5));
+  renderer.shadowMap.enabled = preset !== 'performance';
+  localStorage.setItem('graphics-preset', preset);
+  resizeRenderer();
+}
+
+function applyFov() {
+  camera.fov = Number(fovRange.value);
+  fovValue.textContent = `${camera.fov}°`;
+  camera.updateProjectionMatrix();
+  localStorage.setItem('camera-fov', String(camera.fov));
+}
+
+function gameLoop() {
   requestAnimationFrame(gameLoop);
-}
-
-function drawPlayer(player, isSelf) {
-  const x = player.x * canvas.width;
-  const y = player.y * canvas.height;
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(player.angle);
-  ctx.fillStyle = player.color;
-  ctx.fillRect(-16, -12, 32, 24);
-  ctx.fillStyle = '#eaffff';
-  ctx.fillRect(7, -3, 22, 6);
-  ctx.restore();
-  ctx.fillStyle = '#d7eaff';
-  ctx.font = '14px system-ui';
-  ctx.textAlign = 'center';
-  ctx.fillText(player.name || '玩家', x, y - 25);
-  ctx.fillStyle = '#162536';
-  ctx.fillRect(x - 20, y - 20, 40, 4);
-  ctx.fillStyle = player.health > 35 ? '#75e6a4' : '#ff8585';
-  ctx.fillRect(x - 20, y - 20, 40 * Math.max(0, player.health || 0) / 100, 4);
-  if (isSelf) { ctx.strokeStyle = '#eaffff'; ctx.lineWidth = 2; ctx.strokeRect(x - 20, y - 16, 40, 32); }
-}
-
-function draw() {
-  const backdrop = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-  backdrop.addColorStop(0, '#0b2841');
-  backdrop.addColorStop(1, '#071521');
-  ctx.fillStyle = backdrop;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = '#16405d'; ctx.lineWidth = 1;
-  for (let x = 0; x < canvas.width; x += 48) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke(); }
-  for (let y = 0; y < canvas.height; y += 48) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke(); }
-  ctx.strokeStyle = '#2d6385'; ctx.lineWidth = 2;
-  ctx.strokeRect(16, 16, canvas.width - 32, canvas.height - 32);
-  for (const shot of shots) {
-    const x = shot.x * canvas.width; const y = shot.y * canvas.height;
-    ctx.strokeStyle = shot.color; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(shot.angle) * 90, y + Math.sin(shot.angle) * 90); ctx.stroke();
+  const dt = Math.min(clock.getDelta(), .05);
+  updateMovement(dt);
+  updateCamera();
+  if (performance.now() - lastNetworkUpdate > 50) {
+    broadcast('state', { type: 'state', player: localPlayer });
+    lastNetworkUpdate = performance.now();
   }
-  for (const player of players.values()) drawPlayer(player, false);
-  drawPlayer(localPlayer, true);
-  const crossX = mouse.x * canvas.width;
-  const crossY = mouse.y * canvas.height;
-  ctx.strokeStyle = '#eaffff'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(crossX - 9, crossY); ctx.lineTo(crossX + 9, crossY); ctx.moveTo(crossX, crossY - 9); ctx.lineTo(crossX, crossY + 9); ctx.stroke();
+  syncAvatars();
+  updateTracers(dt);
+  resizeRenderer();
+  renderer.render(scene, camera);
 }
 
 addEventListener('keydown', event => {
-  if (event.target.closest('input, button')) return;
+  if (event.target.closest('input, button, select, summary')) return;
   const key = event.key.toLowerCase();
   if ('wasd'.includes(key)) { keys.add(key); event.preventDefault(); }
+  if (key === 'escape' && pointerLocked) document.exitPointerLock();
 });
 addEventListener('keyup', event => keys.delete(event.key.toLowerCase()));
 addEventListener('blur', () => keys.clear());
-canvas.addEventListener('mousemove', event => {
-  const rect = canvas.getBoundingClientRect();
-  mouse = { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height };
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === canvas;
+  canvasWrap.classList.toggle('aiming', pointerLocked);
+  if (pointerLocked) setStatus('第一人稱瞄準已啟用。WASD 移動，左鍵射擊。');
+  else if (document.hasFocus()) setStatus('已暫停瞄準。點擊競技場即可繼續。');
 });
-canvas.addEventListener('mousedown', event => { if (event.button === 0) fire(); });
+document.addEventListener('mousemove', event => {
+  if (!pointerLocked) return;
+  yaw -= event.movementX * .0022;
+  pitch = THREE.MathUtils.clamp(pitch - event.movementY * .002, -1.22, 1.22);
+});
+canvas.addEventListener('click', () => { if (!pointerLocked) canvas.requestPointerLock(); else fire(); });
 joinButton.addEventListener('click', joinRoom);
 leaveButton.addEventListener('click', () => leaveRoom());
 copyButton.addEventListener('click', async () => {
@@ -433,7 +579,17 @@ copyButton.addEventListener('click', async () => {
     setStatus('無法存取剪貼簿，請手動複製瀏覽器網址。', true);
   }
 });
-requestAnimationFrame(gameLoop);
+signalingUrlInput.addEventListener('change', () => checkService(signalingUrlInput.value.trim()));
+qualityPreset.value = localStorage.getItem('graphics-preset') || 'balanced';
+fovRange.value = localStorage.getItem('camera-fov') || '75';
+qualityPreset.addEventListener('change', applyGraphicsSettings);
+fovRange.addEventListener('input', applyFov);
+
+buildArena();
+createWeapon();
+applyGraphicsSettings();
+applyFov();
+updateCamera();
 updateCombatStats();
 checkService(signalingUrlInput.value);
-signalingUrlInput.addEventListener('change', () => checkService(signalingUrlInput.value.trim()));
+gameLoop();

@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MOS多人連線射擊遊戲</title>
     <link rel="stylesheet" href="./style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js"
+        }
+      }
+    </script>
   </head>
   <body>
     <main class="shell">
@@ -37,6 +44,21 @@
         </div>
         <p id="connectionStatus" class="status" aria-live="polite">尚未連線</p>
         <p class="hint">首次部署後填入 Worker 網址即可。若玩家網路禁止 P2P 直連，將無法加入；這個版本沒有付費 TURN 中繼。</p>
+        <details class="system-settings">
+          <summary>3D 系統設定</summary>
+          <div class="settings-grid">
+            <label>畫質預設
+              <select id="qualityPreset">
+                <option value="performance">效能優先</option>
+                <option value="balanced" selected>平衡</option>
+                <option value="quality">畫質優先</option>
+              </select>
+            </label>
+            <label>視野角度 <output id="fovValue">75°</output>
+              <input id="fovRange" type="range" min="65" max="95" value="75" />
+            </label>
+          </div>
+        </details>
       </section>
 
       <section class="panel game-panel">
@@ -53,6 +75,7 @@
         <div class="arena-layout">
           <div class="canvas-wrap">
             <canvas id="game" width="960" height="540" tabindex="0" aria-label="射擊遊戲畫面"></canvas>
+            <div id="crosshair" class="crosshair" aria-hidden="true"></div>
             <p id="gameToast" class="game-toast" aria-live="polite">輸入房間資訊後即可邀請朋友加入。</p>
           </div>
           <aside class="roster" aria-label="玩家清單">
