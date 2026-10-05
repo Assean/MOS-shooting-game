@@ -18,6 +18,7 @@ const gameToast = document.querySelector('#gameToast');
 const qualityPreset = document.querySelector('#qualityPreset');
 const fovRange = document.querySelector('#fovRange');
 const fovValue = document.querySelector('#fovValue');
+const weaponMode = document.querySelector('#weaponMode');
 const canvasWrap = document.querySelector('.canvas-wrap');
 
 const keys = new Set();
@@ -25,6 +26,10 @@ const peers = new Map();
 const players = new Map();
 const avatars = new Map();
 const tracers = [];
+const projectiles = [];
+const staticColliders = [];
+const raycastTargets = [];
+const positionHistory = [];
 const processedEliminations = new Set();
 const arenaBounds = { x: 20, z: 14 };
 const playerId = localStorage.getItem('player-id') || crypto.randomUUID();
@@ -40,6 +45,10 @@ let lastShotAt = 0;
 let yaw = 0;
 let pitch = 0;
 let pointerLocked = false;
+let weapon;
+let bloom = 0;
+let recoilPitch = 0;
+let recoilRoll = 0;
 let localPlayer = { x: 0, y: CAMERA_HEIGHT, z: 9, angle: 0, color: '#70e5ff', name: '玩家', health: 100, kills: 0, deaths: 0 };
 
 localStorage.setItem('player-id', playerId);
@@ -58,6 +67,7 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const clock = new THREE.Clock();
+const projectileRaycaster = new THREE.Raycaster();
 
 scene.add(new THREE.HemisphereLight('#9ad9ff', '#07101a', 1.8));
 const keyLight = new THREE.DirectionalLight('#e8f7ff', 2.4);
@@ -76,6 +86,8 @@ function addBox({ x, y, z, width, height, depth, color = '#183a54', emissive, in
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   scene.add(mesh);
+  raycastTargets.push(mesh);
+  if (y < 1.2) staticColliders.push({ x, z, halfWidth: width / 2, halfDepth: depth / 2 });
   return mesh;
 }
 
@@ -109,7 +121,7 @@ function buildArena() {
 }
 
 function createWeapon() {
-  const weapon = new THREE.Group();
+  weapon = new THREE.Group();
   const body = new THREE.Mesh(new THREE.BoxGeometry(.18, .14, .72), makeMaterial('#1c6a86', '#0b3445', .6));
   const barrel = new THREE.Mesh(new THREE.BoxGeometry(.08, .08, .55), makeMaterial('#75e6ff', '#4ddff8', 1.8));
   const sight = new THREE.Mesh(new THREE.BoxGeometry(.07, .05, .16), makeMaterial('#d8f8ff'));
@@ -360,9 +372,10 @@ function receiveGameMessage(peerId, raw) {
       renderRoster();
     }
     if (message.type === 'shot' && message.shot) {
-      spawnTracer(message.shot, '#ffca6c');
-      if (isShotHit(message.shot, localPlayer)) takeDamage(peerId);
+      spawnTracer(message.shot, '#ffca6c', message.shot.distance || 30);
+      if (isShotHit(message.shot, rewindLocalPosition(message.shot.sentAt))) takeDamage(peerId);
     }
+    if (message.type === 'projectile' && message.shot) spawnProjectile({ ...message.shot, owner: peerId }, '#c49bff');
     if (message.type === 'eliminated') recordElimination(message);
   } catch { /* Ignore malformed peer messages. */ }
 }
@@ -417,15 +430,39 @@ function leaveRoom(announce = true) {
   if (announce) setStatus('已離開房間。可輸入新房間碼重新加入。');
 }
 
-function spawnTracer(shot, color) {
-  const angle = Number(shot.angle) || 0;
-  const direction = new THREE.Vector3(Math.sin(angle), 0, -Math.cos(angle));
-  const origin = new THREE.Vector3(Number(shot.x) || 0, 1.18, Number(shot.z) || 0);
-  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(.026, .026, 7, 6), makeMaterial(color, color, 4));
-  mesh.position.copy(origin).addScaledVector(direction, 3.5);
+function shotDirection(shot) {
+  return new THREE.Vector3(Number(shot.dx) || Math.sin(shot.angle || 0), Number(shot.dy) || 0, Number(shot.dz) || -Math.cos(shot.angle || 0)).normalize();
+}
+
+function spawnTracer(shot, color, distance = 7) {
+  const direction = shotDirection(shot);
+  const origin = new THREE.Vector3(Number(shot.x) || 0, Number(shot.y) || 1.18, Number(shot.z) || 0);
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(.026, .026, distance, 6), makeMaterial(color, color, 4));
+  mesh.position.copy(origin).addScaledVector(direction, distance / 2);
   mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
   scene.add(mesh);
   tracers.push({ mesh, life: .12 });
+}
+
+function applyRecoil() {
+  recoilPitch = Math.min(.12, recoilPitch + .025 + bloom * .02);
+  recoilRoll = (Math.random() - .5) * .05;
+  bloom = Math.min(.12, bloom + .018);
+}
+
+function makeShot() {
+  const spread = bloom + .006;
+  const spreadYaw = (Math.random() - .5) * spread;
+  const spreadPitch = (Math.random() - .5) * spread;
+  const aim = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  aim.applyAxisAngle(new THREE.Vector3(0, 1, 0), spreadYaw).applyAxisAngle(new THREE.Vector3(1, 0, 0), spreadPitch).normalize();
+  return { x: localPlayer.x, y: CAMERA_HEIGHT - .28, z: localPlayer.z, dx: aim.x, dy: aim.y, dz: aim.z, angle: localPlayer.angle, sentAt: Date.now() };
+}
+
+function raycastDistance(shot) {
+  const raycaster = new THREE.Raycaster(new THREE.Vector3(shot.x, shot.y, shot.z), shotDirection(shot), .2, 30);
+  const hit = raycaster.intersectObjects(raycastTargets, false)[0];
+  return hit ? hit.distance : 30;
 }
 
 function fire() {
@@ -433,18 +470,38 @@ function fire() {
   const now = performance.now();
   if (now - lastShotAt < SHOT_COOLDOWN) return;
   lastShotAt = now;
-  const shot = { x: localPlayer.x, z: localPlayer.z, angle: localPlayer.angle };
-  spawnTracer(shot, '#70e5ff');
-  broadcast('event', { type: 'shot', shot });
+  applyRecoil();
+  const shot = makeShot();
+  if (weaponMode.value === 'projectile') {
+    spawnProjectile(shot, '#b78cff');
+    broadcast('event', { type: 'projectile', shot });
+    return;
+  }
+  const distance = raycastDistance(shot);
+  spawnTracer(shot, '#70e5ff', distance);
+  broadcast('event', { type: 'shot', shot: { ...shot, distance } });
+}
+
+function rewindLocalPosition(sentAt) {
+  if (!sentAt || !positionHistory.length) return localPlayer;
+  return positionHistory.reduce((nearest, sample) => Math.abs(sample.time - sentAt) < Math.abs(nearest.time - sentAt) ? sample : nearest, positionHistory[0]);
 }
 
 function isShotHit(shot, target) {
-  const angle = Number(shot.angle) || 0;
-  const dx = (target.x ?? 0) - (shot.x ?? 0);
-  const dz = (target.z ?? 0) - (shot.z ?? 0);
-  const forward = dx * Math.sin(angle) - dz * Math.cos(angle);
-  const side = Math.abs(dx * Math.cos(angle) + dz * Math.sin(angle));
-  return forward > .65 && forward < 28 && side < .72;
+  const origin = new THREE.Vector3(shot.x, shot.y, shot.z);
+  const toTarget = new THREE.Vector3(target.x, CAMERA_HEIGHT, target.z).sub(origin);
+  const direction = shotDirection(shot);
+  const forward = toTarget.dot(direction);
+  const side = toTarget.clone().subScaledVector(direction, forward).length();
+  const range = Math.min(Number(shot.distance) || 30, 30);
+  return forward > .35 && forward < range && side < .72;
+}
+
+function spawnProjectile(shot, color) {
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(.16, 12, 8), makeMaterial(color, color, 4));
+  mesh.position.set(shot.x, shot.y, shot.z);
+  scene.add(mesh);
+  projectiles.push({ mesh, velocity: shotDirection(shot).multiplyScalar(26), owner: shot.owner, life: 2.2, color });
 }
 
 function takeDamage(killerId) {
@@ -479,15 +536,36 @@ function updateMovement(dt) {
   const forward = (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0);
   const strafe = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
   if (!forward && !strafe) return;
-  const distance = MOVE_SPEED * dt / Math.hypot(forward, strafe);
-  localPlayer.x = THREE.MathUtils.clamp(localPlayer.x + (Math.sin(yaw) * forward + Math.cos(yaw) * strafe) * distance, -arenaBounds.x, arenaBounds.x);
-  localPlayer.z = THREE.MathUtils.clamp(localPlayer.z + (-Math.cos(yaw) * forward + Math.sin(yaw) * strafe) * distance, -arenaBounds.z, arenaBounds.z);
+  const sprinting = keys.has('shift');
+  const distance = MOVE_SPEED * (sprinting ? 1.45 : 1) * dt / Math.hypot(forward, strafe);
+  const next = new THREE.Vector2(
+    THREE.MathUtils.clamp(localPlayer.x + (Math.sin(yaw) * forward + Math.cos(yaw) * strafe) * distance, -arenaBounds.x, arenaBounds.x),
+    THREE.MathUtils.clamp(localPlayer.z + (-Math.cos(yaw) * forward + Math.sin(yaw) * strafe) * distance, -arenaBounds.z, arenaBounds.z),
+  );
+  resolveCompositeColliders(next);
+  localPlayer.x = next.x;
+  localPlayer.z = next.y;
+}
+
+function resolveCompositeColliders(position) {
+  const radius = .48;
+  for (const collider of staticColliders) {
+    const nearestX = THREE.MathUtils.clamp(position.x, collider.x - collider.halfWidth, collider.x + collider.halfWidth);
+    const nearestZ = THREE.MathUtils.clamp(position.y, collider.z - collider.halfDepth, collider.z + collider.halfDepth);
+    const delta = new THREE.Vector2(position.x - nearestX, position.y - nearestZ);
+    if (delta.lengthSq() >= radius * radius) continue;
+    if (delta.lengthSq() < .0001) {
+      const pushX = Math.abs(position.x - collider.x) / collider.halfWidth;
+      const pushZ = Math.abs(position.y - collider.z) / collider.halfDepth;
+      if (pushX > pushZ) position.x = collider.x + Math.sign(position.x - collider.x || 1) * (collider.halfWidth + radius);
+      else position.y = collider.z + Math.sign(position.y - collider.z || 1) * (collider.halfDepth + radius);
+    } else position.addScaledVector(delta.normalize(), radius - delta.length());
+  }
 }
 
 function updateCamera() {
   camera.position.set(localPlayer.x, CAMERA_HEIGHT, localPlayer.z);
-  camera.rotation.y = yaw;
-  camera.rotation.x = pitch;
+  camera.quaternion.setFromEuler(new THREE.Euler(pitch - recoilPitch, yaw, recoilRoll, 'YXZ'));
   localPlayer.angle = yaw;
 }
 
@@ -501,6 +579,44 @@ function updateTracers(dt) {
       tracers.splice(index, 1);
     }
   }
+}
+
+function updateProjectiles(dt) {
+  for (let index = projectiles.length - 1; index >= 0; index -= 1) {
+    const projectile = projectiles[index];
+    projectile.velocity.y -= 12 * dt;
+    const travel = projectile.velocity.clone().multiplyScalar(dt);
+    projectileRaycaster.set(projectile.mesh.position, travel.clone().normalize());
+    projectileRaycaster.near = 0;
+    projectileRaycaster.far = travel.length();
+    const worldHit = projectileRaycaster.intersectObjects(raycastTargets, false)[0];
+    if (!worldHit) projectile.mesh.position.add(travel);
+    projectile.life -= dt;
+    const hitLocal = projectile.owner && Math.hypot(projectile.mesh.position.x - localPlayer.x, projectile.mesh.position.z - localPlayer.z) < .68 && Math.abs(projectile.mesh.position.y - CAMERA_HEIGHT) < 1.35;
+    const outside = Math.abs(projectile.mesh.position.x) > 23 || Math.abs(projectile.mesh.position.z) > 17 || projectile.mesh.position.y < 0;
+    if (hitLocal && projectile.owner) takeDamage(projectile.owner);
+    if (projectile.life <= 0 || outside || hitLocal || worldHit) {
+      scene.remove(projectile.mesh);
+      projectile.mesh.geometry.dispose();
+      projectile.mesh.material.dispose();
+      projectiles.splice(index, 1);
+    }
+  }
+}
+
+function updateCombatDynamics(dt) {
+  bloom = Math.max(0, bloom - dt * .075);
+  recoilPitch = Math.max(0, recoilPitch - dt * .24);
+  recoilRoll = THREE.MathUtils.damp(recoilRoll, 0, 20, dt);
+  const targetFov = Number(fovRange.value) + (keys.has('shift') && (keys.has('w') || keys.has('s') || keys.has('a') || keys.has('d')) ? 9 : 0);
+  camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 8, dt);
+  camera.updateProjectionMatrix();
+  if (weapon) {
+    const targetQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(-.08 - recoilPitch * 1.6, -.08, recoilRoll * 2));
+    weapon.quaternion.slerp(targetQuaternion, 1 - Math.exp(-20 * dt));
+  }
+  positionHistory.push({ time: Date.now(), x: localPlayer.x, z: localPlayer.z });
+  while (positionHistory.length && positionHistory[0].time < Date.now() - 750) positionHistory.shift();
 }
 
 function resizeRenderer() {
@@ -532,6 +648,7 @@ function gameLoop() {
   requestAnimationFrame(gameLoop);
   const dt = Math.min(clock.getDelta(), .05);
   updateMovement(dt);
+  updateCombatDynamics(dt);
   updateCamera();
   if (performance.now() - lastNetworkUpdate > 50) {
     broadcast('state', { type: 'state', player: localPlayer });
@@ -539,6 +656,7 @@ function gameLoop() {
   }
   syncAvatars();
   updateTracers(dt);
+  updateProjectiles(dt);
   resizeRenderer();
   renderer.render(scene, camera);
 }
@@ -546,7 +664,7 @@ function gameLoop() {
 addEventListener('keydown', event => {
   if (event.target.closest('input, button, select, summary')) return;
   const key = event.key.toLowerCase();
-  if ('wasd'.includes(key)) { keys.add(key); event.preventDefault(); }
+  if ('wasd'.includes(key) || key === 'shift') { keys.add(key); event.preventDefault(); }
   if (key === 'escape' && pointerLocked) document.exitPointerLock();
 });
 addEventListener('keyup', event => keys.delete(event.key.toLowerCase()));
@@ -584,6 +702,8 @@ qualityPreset.value = localStorage.getItem('graphics-preset') || 'balanced';
 fovRange.value = localStorage.getItem('camera-fov') || '75';
 qualityPreset.addEventListener('change', applyGraphicsSettings);
 fovRange.addEventListener('input', applyFov);
+weaponMode.value = localStorage.getItem('weapon-mode') || 'hitscan';
+weaponMode.addEventListener('change', () => localStorage.setItem('weapon-mode', weaponMode.value));
 
 buildArena();
 createWeapon();
